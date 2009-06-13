@@ -19,6 +19,7 @@
 #include <gtk/gtk.h>
 #include <gdk/gdkx.h>
 #include <gdk/gdkkeysyms.h>
+#include <dbus/dbus.h>
 
 #include <string.h>
 
@@ -31,8 +32,54 @@ static GtkWidget *scale;
 static guint64 duration;
 static GtkWindow *window;
 static GtkWidget *controls;
+static DBusConnection *session;
 
 #define DURATION_IS_VALID(x) (x != 0 && x != (guint64) -1)
+
+static void
+inhibit_screensaver (gboolean inhibit)
+{
+    DBusMessage *msg, *reply;
+    DBusMessageIter iter;
+    static dbus_uint32_t cookie = 0;
+    const char *value;
+
+    if (inhibit) {
+        if (cookie != 0)
+            return;
+
+        msg = dbus_message_new_method_call ("org.gnome.ScreenSaver",
+                                           "/", "org.gnome.ScreenSaver", "Inhibit");
+
+        value = "gst-player";
+        dbus_message_append_args (msg, DBUS_TYPE_STRING, &value, DBUS_TYPE_INVALID);
+        value = "Playing full-screen";
+        dbus_message_append_args (msg, DBUS_TYPE_STRING, &value, DBUS_TYPE_INVALID);
+
+        reply = dbus_connection_send_with_reply_and_block (session, msg, -1, NULL);
+        if (!reply) {
+            g_warning ("error sending org.gnome.ScreenSaver.Inhibit\n");
+            return;
+        }
+
+        dbus_message_unref (msg);
+
+        dbus_message_get_args (reply, NULL, DBUS_TYPE_UINT32, &cookie, NULL);
+    } else {
+        if (cookie == 0)
+            return;
+
+        msg = dbus_message_new_method_call ("org.gnome.ScreenSaver",
+                                            "/", "org.gnome.ScreenSaver", "UnInhibit");
+        dbus_message_append_args (msg, DBUS_TYPE_UINT32, &cookie, DBUS_TYPE_INVALID);
+        
+        if (!dbus_connection_send (session, msg, NULL))
+            g_warning ("error sending org.gnome.ScreenSaver.UnInhibit\n");
+
+        dbus_message_unref (msg);
+        cookie = 0;
+    }
+}
 
 static void
 toggle_paused (void)
@@ -59,11 +106,13 @@ toggle_fullscreen (void)
     {
         gtk_window_unfullscreen (window);
         gtk_widget_show (controls);
+        inhibit_screensaver (FALSE);
     }
     else
     {
         gtk_window_fullscreen (window);
         gtk_widget_hide (controls);
+        inhibit_screensaver (TRUE);
     }
 }
 
@@ -241,6 +290,15 @@ start (void)
     }
 
     gtk_widget_show (GTK_WIDGET (window));
+
+    {
+        DBusError error;
+
+        dbus_error_init (&error);
+        session = dbus_bus_get (DBUS_BUS_SESSION, &error);
+        if (!session)
+            g_warning ("%s: %s\n", error.name, error.message);
+    }
 }
 
 static gboolean
